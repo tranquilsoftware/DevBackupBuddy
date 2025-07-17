@@ -1,0 +1,2 @@
+# Core dependencies for the backup script
+# No external dependencies required - uses only Python standard library

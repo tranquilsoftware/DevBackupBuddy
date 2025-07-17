@@ -46,7 +46,6 @@ To add/remove a directory, simply go to the config.py file and modify to your de
 - `__pycache__/` - Python cache
 - `.venv/`, `venv/` - Python virtual environments
 - `.idea/`, `.vscode/` - IDE settings
-- `*.log`, `*.tmp`, `*.pyc` - Temporary and cache files
 
 ## License
 

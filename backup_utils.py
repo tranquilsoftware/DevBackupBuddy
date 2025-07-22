@@ -101,7 +101,7 @@ class BackupManager:
         
         # Print skipped files if any
         if self.skipped_files:
-            print("\nSkipped files (larger than {MAX_FILE_SIZE_MB}MB):")
+            print(f"\nSkipped files (larger than {MAX_FILE_SIZE_MB}MB):")
             print("-" * 50)
             # Sort by size in descending order
             for filename, size_mb in sorted(self.skipped_files, key=lambda x: x[1], reverse=True):

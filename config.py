@@ -34,3 +34,6 @@ EXCLUDE_EXTENSIONS = [
     '.pyd',
     '.DS_Store'
 ]
+
+# Maximum file size in MB (files larger than this will be skipped)
+MAX_FILE_SIZE_MB = 256

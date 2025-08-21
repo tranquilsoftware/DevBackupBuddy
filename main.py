@@ -25,7 +25,7 @@ from pathlib import Path
 
 from disk_utils import get_available_drives, is_valid_destination, create_backup_directory
 from backup_utils import BackupManager
-from config import EXCLUDE_DIRS, EXCLUDE_EXTENSIONS
+from config import EXCLUDE_DIRS, EXCLUDE_EXTENSIONS, MAX_FILE_SIZE_MB
 
 class BackupCLI:
     def __init__(self):
@@ -45,6 +45,8 @@ class BackupCLI:
         backup_parser.add_argument('source', help='Source directory to back up')
         backup_parser.add_argument('--destination', help='Destination directory (optional)')
         backup_parser.add_argument('--name', default='backup', help='Backup directory name (default: backup)')
+        backup_parser.add_argument('--max-file-size', type=int, default=MAX_FILE_SIZE_MB,
+                                 help=f'Maximum file size in MB to include in backup (default: {MAX_FILE_SIZE_MB}MB)')
         
         # Config command
         config_parser = subparsers.add_parser('config', help='Configure backup settings')
@@ -70,7 +72,8 @@ class BackupCLI:
         print("\nTo start a backup, run:")
         print("  python main.py backup <source> --destination <drive_letter>\\<folder>")
     
-    def run_backup(self, source: str, destination: Optional[str] = None, name: str = 'backup') -> None:
+    def run_backup(self, source: str, destination: Optional[str] = None, 
+                  name: str = 'backup', max_file_size: int = MAX_FILE_SIZE_MB) -> None:
         """Run the backup process."""
         if not os.path.exists(source):
             print(f"Error: Source directory does not exist: {source}")
@@ -84,6 +87,9 @@ class BackupCLI:
         if not is_valid_destination(destination):
             print(f"Error: Cannot write to destination: {destination}")
             return
+        
+        # Update max file size in the backup manager
+        self.backup_manager.max_file_size_mb = max_file_size
         
         # Create backup directory with timestamp
         backup_path = create_backup_directory(destination, name)
@@ -143,7 +149,7 @@ class BackupCLI:
         if args.command == 'list':
             self.list_destinations()
         elif args.command == 'backup':
-            self.run_backup(args.source, args.destination, args.name)
+            self.run_backup(args.source, args.destination, args.name, args.max_file_size)
         elif args.command == 'config':
             self.update_config(args)
         else:

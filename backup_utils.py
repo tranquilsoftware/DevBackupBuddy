@@ -3,10 +3,11 @@ Core backup functionality.
 """
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import List, Set, Optional
-import os
 from config import EXCLUDE_DIRS, EXCLUDE_EXTENSIONS, MAX_FILE_SIZE_MB
+from onedrive_utils import OneDriveUtils
 
 class BackupManager:
     def __init__(self, max_file_size_mb: int = MAX_FILE_SIZE_MB):
@@ -63,9 +64,22 @@ class BackupManager:
         Returns True if file was copied, False if skipped (already exists with same size/mtime)
         """
         try:
-            # Check if destination file exists and has same size and mtime
-            if os.path.exists(dst):
+            # Only check OneDrive status on Windows
+            if sys.platform == 'win32':
+                # Ensure the source file is downloaded if it's a OneDrive file
+                if OneDriveUtils.is_onedrive_file(src) and not OneDriveUtils.ensure_file_downloaded(src):
+                    print(f"Skipped (could not download from OneDrive): {src}")
+                    return False
+            
+            # Get source file stats
+            try:
                 src_stat = os.stat(src)
+            except OSError as e:
+                print(f"Error accessing source file {src}: {e}")
+                return False
+            
+            # Check if destination exists and is the same
+            if os.path.exists(dst):
                 try:
                     dst_stat = os.stat(dst)
                     if src_stat.st_size == dst_stat.st_size and src_stat.st_mtime <= dst_stat.st_mtime:
@@ -75,10 +89,25 @@ class BackupManager:
                     # If we can't stat the destination, continue with copy
                     pass
             
+            # Ensure destination directory exists
             os.makedirs(os.path.dirname(dst), exist_ok=True)
+            
+            # Perform the copy
             shutil.copy2(src, dst)
-            print(f"Copied: {src}")
-            return True
+            
+            # Verify the copy was successful
+            if os.path.exists(dst):
+                dst_size = os.path.getsize(dst)
+                if dst_size == src_stat.st_size:
+                    print(f"Copied: {src} ({src_stat.st_size} bytes)")
+                    return True
+                else:
+                    print(f"Warning: Incomplete copy - expected {src_stat.st_size} bytes, got {dst_size} bytes: {src}")
+                    return False
+            else:
+                print(f"Error: Failed to copy file: {src}")
+                return False
+                
         except (IOError, OSError) as e:
             print(f"Error copying {src}: {e}")
             return False

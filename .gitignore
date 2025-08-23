@@ -25,3 +25,4 @@ Thumbs.db
 *.xml
 *.log
 misc.xml
+.COMMON_BACKUPS

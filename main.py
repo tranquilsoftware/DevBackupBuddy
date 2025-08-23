@@ -7,10 +7,10 @@ How to Use:
    python main.py list
 
 2. Start a backup:
-   python main.py backup <source> --destination <drive_letter>\\<folder>
+   python main.py backup <source> --destination <drive_letter>/<folder>
    e.g.: `python main.py backup "C:/path/to/source" --destination "D:/backups" --name "my_backup"`
    e.g.: `python main.py backup "C:/Users/username/OneDrive/TranquilSoftware" --destination "D:/backups" --name "TranquilSoftware"` 
-        \--> Saves C:/Users/username/OneDrive/TranquilSoftware to D:/backups/TranquilSoftware
+        --> Saves C:/Users/username/OneDrive/TranquilSoftware to D:/backups/TranquilSoftware
 
 3. Configure backup settings:
    python main.py config --add-exclude <directory>
@@ -73,7 +73,7 @@ class BackupCLI:
         print("  python main.py backup <source> --destination <drive_letter>\\<folder>")
     
     def run_backup(self, source: str, destination: Optional[str] = None, 
-                  name: str = 'backup', max_file_size: int = MAX_FILE_SIZE_MB) -> None:
+                  name: Optional[str] = None, max_file_size: int = MAX_FILE_SIZE_MB) -> None:
         """Run the backup process."""
         if not os.path.exists(source):
             print(f"Error: Source directory does not exist: {source}")
@@ -91,8 +91,12 @@ class BackupCLI:
         # Update max file size in the backup manager
         self.backup_manager.max_file_size_mb = max_file_size
         
-        # Create backup directory with timestamp
-        backup_path = create_backup_directory(destination, name)
+        # If name is not provided, use the destination directly
+        if name is None:
+            backup_path = destination
+        else:
+            # Create backup directory with timestamp and name
+            backup_path = create_backup_directory(destination, name)
         
         # Start the backup
         self.backup_manager.backup_directory(source, backup_path)

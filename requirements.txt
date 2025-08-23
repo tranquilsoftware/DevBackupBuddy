@@ -1,2 +1,4 @@
 # Core dependencies for the backup script
-# No external dependencies required - uses only Python standard library
+# pywin32 is only required on Windows
+platform_system == "Windows"; python_version >= "3.8"
+pywin32>=300; platform_system == "Windows"

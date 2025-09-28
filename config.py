@@ -2,6 +2,9 @@
 Configuration settings for the backup script.
 """
 
+# Maximum file size in MB (files larger than this will be skipped)
+MAX_FILE_SIZE_MB = 256
+
 # List of directories to exclude from backup
 EXCLUDE_DIRS = [
     # typescript / web dev
@@ -34,6 +37,3 @@ EXCLUDE_EXTENSIONS = [
     '.pyd',
     '.DS_Store'
 ]
-
-# Maximum file size in MB (files larger than this will be skipped)
-MAX_FILE_SIZE_MB = 256

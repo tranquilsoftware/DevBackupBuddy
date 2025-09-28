@@ -17,161 +17,46 @@ How to Use:
    python main.py config --remove-exclude <directory>
    python main.py config --list-excludes
 """
-import os
-import sys
 import argparse
-from typing import List, Optional
-from pathlib import Path
-
-from disk_utils import get_available_drives, is_valid_destination, create_backup_directory
+import os
 from backup_utils import BackupManager
-from config import EXCLUDE_DIRS, EXCLUDE_EXTENSIONS, MAX_FILE_SIZE_MB
-
-class BackupCLI:
-    def __init__(self):
-        self.backup_manager = BackupManager()
-        self.parser = self._create_parser()
-    
-    def _create_parser(self) -> argparse.ArgumentParser:
-        """Create the command line argument parser."""
-        parser = argparse.ArgumentParser(description='Backup utility for directories')
-        subparsers = parser.add_subparsers(dest='command', help='Commands')
-        
-        # List command
-        list_parser = subparsers.add_parser('list', help='List available backup destinations')
-        
-        # Backup command
-        backup_parser = subparsers.add_parser('backup', help='Start a backup')
-        backup_parser.add_argument('source', help='Source directory to back up')
-        backup_parser.add_argument('--destination', help='Destination directory (optional)')
-        backup_parser.add_argument('--name', default='backup', help='Backup directory name (default: backup)')
-        backup_parser.add_argument('--max-file-size', type=int, default=MAX_FILE_SIZE_MB,
-                                 help=f'Maximum file size in MB to include in backup (default: {MAX_FILE_SIZE_MB}MB)')
-        
-        # Config command
-        config_parser = subparsers.add_parser('config', help='Configure backup settings')
-        config_parser.add_argument('--add-exclude', help='Add directory to exclude list')
-        config_parser.add_argument('--remove-exclude', help='Remove directory from exclude list')
-        config_parser.add_argument('--list-excludes', action='store_true', help='List all excluded directories')
-        
-        return parser
-    
-    def list_destinations(self) -> None:
-        """List all available backup destinations."""
-        print("\nAvailable backup destinations:")
-        print("-" * 40)
-        
-        drives = get_available_drives()
-        if not drives:
-            print("No external drives found. Please connect a USB drive and try again.")
-            return
-        
-        for i, drive in enumerate(drives, 1):
-            print(f"{i}. {drive}")
-        
-        print("\nTo start a backup, run:")
-        print("  python main.py backup <source> --destination <drive_letter>\\<folder>")
-    
-    def run_backup(self, source: str, destination: Optional[str] = None, 
-                  name: Optional[str] = None, max_file_size: int = MAX_FILE_SIZE_MB) -> None:
-        """Run the backup process."""
-        if not os.path.exists(source):
-            print(f"Error: Source directory does not exist: {source}")
-            return
-        
-        if not destination:
-            # If no destination specified, show available drives
-            self.list_destinations()
-            return
-        
-        if not is_valid_destination(destination):
-            print(f"Error: Cannot write to destination: {destination}")
-            return
-        
-        # Update max file size in the backup manager
-        self.backup_manager.max_file_size_mb = max_file_size
-        
-        # If name is not provided, use the destination directly
-        if name is None:
-            backup_path = destination
-        else:
-            # Create backup directory with timestamp and name
-            backup_path = create_backup_directory(destination, name)
-        
-        # Start the backup
-        self.backup_manager.backup_directory(source, backup_path)
-    
-    def update_config(self, args) -> None:
-        """Update configuration settings."""
-        if args.list_excludes:
-            print("\nExcluded directories:")
-            print("-" * 40)
-            for item in sorted(EXCLUDE_DIRS):
-                print(f"- {item}")
-            return
-        
-        if args.add_exclude:
-            if args.add_exclude not in EXCLUDE_DIRS:
-                EXCLUDE_DIRS.append(args.add_exclude)
-                self._save_config()
-                print(f"Added '{args.add_exclude}' to exclude list")
-            else:
-                print(f"'{args.add_exclude}' is already in the exclude list")
-        
-        if args.remove_exclude:
-            if args.remove_exclude in EXCLUDE_DIRS:
-                EXCLUDE_DIRS.remove(args.remove_exclude)
-                self._save_config()
-                print(f"Removed '{args.remove_exclude}' from exclude list")
-            else:
-                print(f"'{args.remove_exclude}' is not in the exclude list")
-    
-    def _save_config(self) -> None:
-        """Save the current configuration to config.py."""
-        with open('config.py', 'w') as f:
-            f.write('"""\nConfiguration settings for the backup script.\n"""\
-\n')
-            f.write('# List of directories to exclude from backup\n')
-            f.write('EXCLUDE_DIRS = [\n')
-            for item in sorted(EXCLUDE_DIRS):
-                f.write(f'    \'{item}\',\n')
-            f.write(']\n\n')
-            f.write('# File extensions to exclude (optional)\n')
-            f.write('EXCLUDE_EXTENSIONS = [\n')
-            for ext in sorted(EXCLUDE_EXTENSIONS):
-                f.write(f'    \'{ext}\',\n')
-            f.write(']\n')
-    
-    def run(self) -> None:
-        """Run the CLI application."""
-        if len(sys.argv) == 1:
-            self.parser.print_help()
-            return
-        
-        args = self.parser.parse_args()
-        
-        if args.command == 'list':
-            self.list_destinations()
-        elif args.command == 'backup':
-            self.run_backup(args.source, args.destination, args.name, args.max_file_size)
-        elif args.command == 'config':
-            self.update_config(args)
-        else:
-            self.parser.print_help()
-
+from disk_utils import get_available_drives, is_valid_destination
+from config import MAX_FILE_SIZE_MB
 
 def main():
-    """Main entry point for the backup script."""
-    try:
-        cli = BackupCLI()
-        cli.run()
-    except KeyboardInterrupt:
-        print("\nBackup cancelled by user.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\nAn error occurred: {e}", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Developer Backup Buddy")
+    subparsers = parser.add_subparsers(dest="command")
 
+    # List available drives
+    subparsers.add_parser("list", help="List available backup destinations")
 
-if __name__ == '__main__':
+    # Backup command
+    backup_parser = subparsers.add_parser("backup", help="Backup a directory")
+    backup_parser.add_argument("source", help="Source directory")
+    backup_parser.add_argument("--destination", "-d", required=True, help="Destination directory")
+    backup_parser.add_argument("--max-file-size", type=int, help="Override max file size in MB")
+
+    args = parser.parse_args()
+
+    if args.command == "list":
+        drives = get_available_drives()
+        print("Available drives:", drives)
+        return
+
+    if args.command == "backup":
+        src = args.source
+        dst = args.destination
+
+        if not os.path.exists(src):
+            print("Source directory does not exist!")
+            return
+        if not os.path.exists(dst) or not is_valid_destination(dst):
+            print("Destination is invalid or not writable!")
+            return
+
+        max_size = args.max_file_size if args.max_file_size else MAX_FILE_SIZE_MB
+        manager = BackupManager(max_file_size_mb=max_size)
+        manager.backup_directory(src, dst)
+
+if __name__ == "__main__":
     main()

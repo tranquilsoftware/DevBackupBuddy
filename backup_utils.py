@@ -93,8 +93,24 @@ class BackupManager:
             for file in files:
                 total_files += 1
                 src_path = os.path.join(root, file)
-                rel_path = os.path.relpath(src_path, src)
-                dst_path = os.path.join(dst, rel_path)
+
+                # Handle strange file names and paths
+                try:
+                    # First try the normal relative path
+                    rel_path = os.path.relpath(src_path, src)
+                except ValueError:
+                    # If that fails (different drives or special paths), use a different approach
+                    try:
+                        # Try to get a relative path from the common parent
+                        common = os.path.commonpath([os.path.normpath(src_path), os.path.normpath(src)])
+                        rel_path = os.path.relpath(os.path.normpath(src_path), common)
+                    except (ValueError, TypeError):
+                        # If all else fails, use a path relative to the source root
+                        rel_path = os.path.basename(src_path)
+                
+                # Clean up any potential path issues
+                rel_path = rel_path.replace('\\', '/')
+                dst_path = os.path.normpath(os.path.join(dst, rel_path))
 
                 if self._should_skip(src_path):
                     continue

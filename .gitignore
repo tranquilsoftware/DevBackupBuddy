@@ -1,3 +1,4 @@
+.COMMON_BACKUPS
 # IDE and Editor directories
 .idea/
 .vscode/
@@ -25,4 +26,3 @@ Thumbs.db
 *.xml
 *.log
 misc.xml
-.COMMON_BACKUPS

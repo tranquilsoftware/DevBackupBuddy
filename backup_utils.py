@@ -1,156 +1,270 @@
+"""
+Backup manager for DevBackupBuddy.
+Uses MD5-based indexing for smart sync with move detection.
+"""
 import os
-import shutil
-from pathlib import Path
-from typing import List, Dict
+import sys
+from typing import List, Dict, Set
 from config import EXCLUDE_DIRS, EXCLUDE_EXTENSIONS, MAX_FILE_SIZE_MB
+from file_index import (
+    FileIndex, FileInfo, build_index,
+    load_index_cache, save_index_cache, get_cache_path
+)
+from sync_engine import (
+    generate_sync_plan, execute_sync_plan, verify_mirror,
+    execute_deletes, cleanup_empty_dirs, print_sync_plan_summary,
+    SyncPlan, SyncResult
+)
 from onedrive_utils import is_onedrive_file
 
+
 class BackupManager:
+    """
+    Manages backup operations with smart sync capabilities.
+
+    Features:
+    - MD5-based file indexing for detecting moved files
+    - Cached indexes for faster subsequent backups
+    - Safe deletion only after verification
+    - Move detection to avoid re-copying reorganized files
+    """
+
     def __init__(self, max_file_size_mb: int = None):
         self.excluded_dirs = set(EXCLUDE_DIRS)
         self.excluded_extensions = set(EXCLUDE_EXTENSIONS)
         self.max_file_size_mb = max_file_size_mb or MAX_FILE_SIZE_MB
         self.skipped_files: List[Dict] = []
-        self.onedrive_files: List[Dict] = []
 
-    def _format_size(self, size_mb: float) -> str:
-        if size_mb < 1: return f"{size_mb*1024:.0f}KB"
-        if size_mb < 1024: return f"{size_mb:.1f}MB"
-        return f"{size_mb/1024:.1f}GB"
+    def _format_size(self, size_bytes: int) -> str:
+        """Format file size for display."""
+        size_mb = size_bytes / (1024 * 1024)
+        if size_mb < 1:
+            return f"{size_bytes / 1024:.0f}KB"
+        if size_mb < 1024:
+            return f"{size_mb:.1f}MB"
+        return f"{size_mb / 1024:.1f}GB"
 
-    def _add_skipped(self, path: str, reason: str):
-        size_mb = os.path.getsize(path) / (1024*1024) if os.path.isfile(path) else 0
-        self.skipped_files.append({
-            "path": path,
-            "filename": os.path.basename(path),
-            "size_mb": size_mb,
-            "reason": reason
-        })
+    def _progress_callback(self, current: int, total: int, filepath: str):
+        """Progress callback for indexing."""
+        pct = (current / total * 100) if total > 0 else 0
+        # Truncate filepath for display
+        display_path = filepath[:50] + "..." if len(filepath) > 50 else filepath
+        sys.stdout.write(f"\r  Indexing: {pct:5.1f}% ({current}/{total}) {display_path:<55}")
+        sys.stdout.flush()
 
-    def _should_skip(self, path: str) -> bool:
-        parts = Path(path).parts
-        if any(d in self.excluded_dirs for d in parts):
-            self._add_skipped(path, "Excluded directory")
-            return True
-        if any(path.lower().endswith(ext.lower()) for ext in self.excluded_extensions):
-            self._add_skipped(path, "Excluded extension")
-            return True
-        if os.path.isfile(path):
-            size_mb = os.path.getsize(path) / (1024*1024)
-            if size_mb > self.max_file_size_mb:
-                self._add_skipped(path, f"File size {self._format_size(size_mb)} > {self.max_file_size_mb}MB")
-                return True
-        return False
+    def _sync_progress_callback(self, action: str, item, current: int, total: int):
+        """Progress callback for sync operations."""
+        pct = (current / total * 100) if total > 0 else 0
+        display_path = item.src_rel_path or item.dst_rel_path
+        if len(display_path) > 45:
+            display_path = display_path[:45] + "..."
+        sys.stdout.write(f"\r  {action.upper():6} {pct:5.1f}% ({current}/{total}) {display_path:<50}")
+        sys.stdout.flush()
 
-    def _copy_file(self, src: str, dst: str) -> bool:
-        try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-            return True
-        except Exception as e:
-            self._add_skipped(src, f"Failed to copy: {e}")
-            return False
+    def _verify_progress_callback(self, current: int, total: int, filepath: str):
+        """Progress callback for verification."""
+        pct = (current / total * 100) if total > 0 else 0
+        display_path = filepath[:50] + "..." if len(filepath) > 50 else filepath
+        sys.stdout.write(f"\r  Verifying: {pct:5.1f}% ({current}/{total}) {display_path:<50}")
+        sys.stdout.flush()
 
-    def _build_dst_index(self, dst_root: str) -> dict:
-        """Build relative path -> (size, mtime) for all files in destination."""
-        dst_index = {}
-        for root, _, files in os.walk(dst_root):
-            for f in files:
-                full_path = os.path.join(root, f)
-                rel_path = os.path.relpath(full_path, dst_root)
-                try:
-                    stat = os.stat(full_path)
-                    dst_index[rel_path] = (stat.st_size, stat.st_mtime)
-                except OSError:
-                    continue
-        return dst_index
+    def backup_directory(self, src: str, dst: str, dry_run: bool = False, verify_only: bool = False):
+        """
+        Backup source directory to destination with smart sync.
 
-    # Backup if file is not already up-to-date, or if file size is larger
-    def backup_directory(self, src: str, dst: str):
+        Args:
+            src: Source directory path
+            dst: Destination directory path
+            dry_run: If True, show what would happen without executing
+            verify_only: If True, only verify existing backup without syncing
+        """
         src = os.path.abspath(src)
         dst = os.path.abspath(dst)
-        self.skipped_files = []
-        self.onedrive_files = []
 
         if not os.path.exists(src):
             print(f"Source does not exist: {src}")
             return
 
-        print(f"\nBacking up {src} -> {dst}")
-        print(f"Skipping files larger than {self.max_file_size_mb}MB")
-        print(f"Excluding directories: {', '.join(sorted(self.excluded_dirs))}")
-        print("-"*50)
+        # Ensure destination exists
+        if not dry_run and not verify_only:
+            os.makedirs(dst, exist_ok=True)
 
-        total_files = 0
-        copied_files = 0
+        print(f"\n{'=' * 70}")
+        print(f"{'DRY RUN - ' if dry_run else ''}DevBackupBuddy Smart Sync")
+        print(f"{'=' * 70}")
+        print(f"Source:      {src}")
+        print(f"Destination: {dst}")
+        print(f"Max file size: {self.max_file_size_mb}MB")
+        print(f"Excluded dirs: {', '.join(sorted(self.excluded_dirs))}")
+        print(f"{'-' * 70}")
 
-        # Build index of destination files for fast skip checking
-        dst_index = self._build_dst_index(dst)
+        # Phase 1: Build source index
+        print("\n[Phase 1] Building source index...")
+        src_index, src_skipped = build_index(
+            src,
+            excluded_dirs=self.excluded_dirs,
+            excluded_extensions=self.excluded_extensions,
+            max_file_size_mb=self.max_file_size_mb,
+            progress_callback=self._progress_callback
+        )
+        print(f"\n  Source: {len(src_index)} files indexed, {len(src_skipped)} skipped")
+        self.skipped_files = src_skipped
 
-        for root, dirs, files in os.walk(src, topdown=True):
-            dirs[:] = [d for d in dirs if not self._should_skip(os.path.join(root, d))]
+        # If verify_only, just verify and exit
+        if verify_only:
+            print("\n[Verify Only Mode] Checking destination...")
+            success, mismatches = verify_mirror(
+                src_index, dst,
+                progress_callback=self._verify_progress_callback
+            )
+            print()
+            self._print_verification_result(success, mismatches)
+            return
 
-            for file in files:
-                total_files += 1
-                src_path = os.path.join(root, file)
+        # Phase 2: Build destination index (with cache)
+        print("\n[Phase 2] Building destination index...")
+        cache_path = get_cache_path(dst)
+        dst_cache = load_index_cache(cache_path) if os.path.exists(cache_path) else None
+        if dst_cache:
+            print(f"  Using cached index ({len(dst_cache)} entries)")
 
-                # Handle strange file names and paths
-                try:
-                    # First try the normal relative path
-                    rel_path = os.path.relpath(src_path, src)
-                except ValueError:
-                    # If that fails (different drives or special paths), use a different approach
-                    try:
-                        # Try to get a relative path from the common parent
-                        common = os.path.commonpath([os.path.normpath(src_path), os.path.normpath(src)])
-                        rel_path = os.path.relpath(os.path.normpath(src_path), common)
-                    except (ValueError, TypeError):
-                        # If all else fails, use a path relative to the source root
-                        rel_path = os.path.basename(src_path)
-                
-                # Clean up any potential path issues
-                rel_path = rel_path.replace('\\', '/')
-                dst_path = os.path.normpath(os.path.join(dst, rel_path))
+        dst_index, _ = build_index(
+            dst,
+            excluded_dirs=self.excluded_dirs,
+            excluded_extensions=self.excluded_extensions,
+            max_file_size_mb=999999,  # Don't skip large files in destination
+            cache=dst_cache,
+            progress_callback=self._progress_callback
+        )
+        print(f"\n  Destination: {len(dst_index)} files indexed")
 
-                if self._should_skip(src_path):
-                    continue
+        # Phase 3: Generate sync plan
+        print("\n[Phase 3] Generating sync plan...")
+        plan = generate_sync_plan(src_index, dst_index, src, dst)
+        print_sync_plan_summary(plan)
 
-                # Skip if destination already up-to-date
-                src_stat = os.stat(src_path)
-                if rel_path in dst_index:
-                    dst_size, dst_mtime = dst_index[rel_path]
+        # Nothing to do?
+        if not plan.copies and not plan.moves and not plan.deletes:
+            print("Destination is already in sync!")
+            self._print_summary(0, 0, 0, len(plan.skips))
+            return
 
-                    # If file size is same, and source file is older or same age, skip
-                    if src_stat.st_size == dst_size and src_stat.st_mtime <= dst_mtime:
-                        self._add_skipped(src_path, "Already up-to-date")
-                        continue
+        if dry_run:
+            print("\n[DRY RUN] No changes made.")
+            self._print_summary(
+                len(plan.copies), len(plan.moves), len(plan.deletes),
+                len(plan.skips), dry_run=True
+            )
+            return
 
-                # Defer OneDrive files
-                if is_onedrive_file(src_path):
-                    self.onedrive_files.append({"src": src_path, "dst": dst_path})
-                    continue
+        # Phase 4: Execute sync (moves + copies)
+        print("\n[Phase 4] Executing sync...")
+        result = execute_sync_plan(
+            plan,
+            dry_run=dry_run,
+            progress_callback=self._sync_progress_callback
+        )
+        print()
 
-                if self._copy_file(src_path, dst_path):
-                    copied_files += 1
+        if result.errors:
+            print(f"\n  Errors during sync:")
+            for err in result.errors[:10]:
+                print(f"    {err['action']}: {err['path']} - {err['error']}")
+            if len(result.errors) > 10:
+                print(f"    ... and {len(result.errors) - 10} more errors")
 
-        # Copy OneDrive files last
-        for item in self.onedrive_files:
-            if self._copy_file(item["src"], item["dst"]):
-                copied_files += 1
+        # Phase 5: Verify mirror integrity
+        print("\n[Phase 5] Verifying mirror integrity...")
+        success, mismatches = verify_mirror(
+            src_index, dst,
+            progress_callback=self._verify_progress_callback
+        )
+        print()
 
-        # Summary
-        skipped_count = len(self.skipped_files)
-        print("\n" + "="*80)
-        if skipped_count:
-            print("\nSkipped files:")
-            print(f"{'File':<50} | {'Size':<10} | Reason")
-            print("-"*80)
-            for item in sorted(self.skipped_files, key=lambda x: x["size_mb"], reverse=True):
-                print(f"{item['filename'][:48]:<50} | {self._format_size(item['size_mb']):<10} | {item['reason']}")
-    
-        print("="*80)
-        print(f"Backup completed!")
-        print(f"Total files scanned: {total_files}")
-        print(f"Files copied: {copied_files}")
-        print(f"Files skipped: {skipped_count}")
-        print("="*80)
+        if not success:
+            print(f"\n  VERIFICATION FAILED - {len(mismatches)} mismatches found:")
+            for m in mismatches[:10]:
+                print(f"    {m['path']}: {m['reason']}")
+            if len(mismatches) > 10:
+                print(f"    ... and {len(mismatches) - 10} more")
+            print("\n  Skipping deletions due to verification failure.")
+            self._print_summary(result.copied, result.moved, 0, result.skipped)
+            return
+
+        print("  Verification PASSED!")
+
+        # Phase 6: Execute deletions (only after verification)
+        deleted = 0
+        if plan.deletes:
+            print(f"\n[Phase 6] Deleting {len(plan.deletes)} orphaned files...")
+            deleted, del_errors = execute_deletes(plan, dry_run=dry_run)
+            if del_errors:
+                print(f"  Errors during deletion:")
+                for err in del_errors[:5]:
+                    print(f"    {err['path']}: {err['error']}")
+
+        # Phase 7: Clean up empty directories
+        print("\n[Phase 7] Cleaning empty directories...")
+        removed_dirs = cleanup_empty_dirs(dst, dry_run=dry_run)
+        if removed_dirs:
+            print(f"  Removed {removed_dirs} empty directories")
+
+        # Phase 8: Save updated index cache
+        print("\n[Phase 8] Saving index cache...")
+        # Rebuild destination index after all changes
+        final_dst_index, _ = build_index(
+            dst,
+            excluded_dirs=self.excluded_dirs,
+            excluded_extensions=self.excluded_extensions,
+            max_file_size_mb=999999,
+            progress_callback=None  # Silent rebuild
+        )
+        save_index_cache(cache_path, final_dst_index)
+        print(f"  Cache saved: {cache_path}")
+
+        # Print final summary
+        self._print_summary(result.copied, result.moved, deleted, result.skipped)
+        self._print_skipped_files()
+
+    def _print_verification_result(self, success: bool, mismatches: List[Dict]):
+        """Print verification results."""
+        print(f"\n{'=' * 70}")
+        if success:
+            print("VERIFICATION PASSED - Destination is a valid mirror")
+        else:
+            print(f"VERIFICATION FAILED - {len(mismatches)} issues found:")
+            for m in mismatches[:20]:
+                print(f"  {m['path']}: {m['reason']}")
+            if len(mismatches) > 20:
+                print(f"  ... and {len(mismatches) - 20} more")
+        print(f"{'=' * 70}")
+
+    def _print_summary(self, copied: int, moved: int, deleted: int, skipped: int, dry_run: bool = False):
+        """Print backup summary."""
+        print(f"\n{'=' * 70}")
+        print(f"{'DRY RUN ' if dry_run else ''}Backup Complete!")
+        print(f"{'=' * 70}")
+        print(f"  Files copied:  {copied}")
+        print(f"  Files moved:   {moved}")
+        print(f"  Files deleted: {deleted}")
+        print(f"  Files skipped: {skipped}")
+        print(f"{'=' * 70}")
+
+    def _print_skipped_files(self):
+        """Print skipped files summary."""
+        if not self.skipped_files:
+            return
+
+        print(f"\nSkipped files ({len(self.skipped_files)} total):")
+        print(f"{'File':<50} | {'Size':<10} | Reason")
+        print("-" * 90)
+
+        # Sort by size descending
+        sorted_skipped = sorted(self.skipped_files, key=lambda x: x["size_mb"], reverse=True)
+        for item in sorted_skipped[:20]:
+            filename = item['filename'][:48]
+            size = self._format_size(int(item['size_mb'] * 1024 * 1024))
+            print(f"{filename:<50} | {size:<10} | {item['reason']}")
+
+        if len(sorted_skipped) > 20:
+            print(f"... and {len(sorted_skipped) - 20} more skipped files")

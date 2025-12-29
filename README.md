@@ -1,77 +1,105 @@
-## DevBackupBuddy
-# Development Backup Utility
+# DevBackupBuddy
 
-A simple command-line utility for backing up directories to external drives with smart exclusions.
+Smart backup utility with **MD5-based move detection**. When you reorganize files in your source folder, it moves them on the backup instead of re-copying. Verifies integrity before deleting orphaned files.
+
+## Quick Start
+
+```bash
+python main.py backup "C:/Projects" -d "E:/Backup"           # Normal backup
+python main.py backup "C:/Projects" -d "E:/Backup" --dry-run # Preview changes
+python main.py backup "C:/Projects" -d "E:/Backup" --verify-only # Verify integrity
+python main.py list                                          # List available drives
+```
 
 ## Features
 
-- 🔍 Automatic detection of available drives
-- 🚫 Smart exclusion of common development directories (`node_modules`, `dist/`, `.git`, etc.)
-- ⚙️ Configurable exclude list
-- 📂 Preserves directory structure
-- 🖥️ Simple CLI interface
+- **Move detection** - Reorganized files are moved, not re-copied (via MD5 matching)
+- **Cached indexes** - MD5 hashes cached in `.backup_index.json` for faster subsequent backups
+- **Safe deletion** - Orphaned files only deleted after full verification passes
+- **Dry run mode** - See what would happen without making changes
+- **Smart exclusions** - Skips `node_modules`, `.git`, `__pycache__`, etc.
 
-## Installation
+## How It Works
 
-1. Clone this repository
-2. Install Python 3.8+
-3. No additional dependencies required!
+1. **Index source** - Compute MD5, size, mtime for each file
+2. **Index destination** - Load from cache or compute (reuses cached MD5 if file unchanged)
+3. **Generate plan** - Compare indexes, detect moves via MD5 + filename matching
+4. **Execute** - Move files, then copy new/changed files
+5. **Verify** - Confirm destination mirrors source correctly
+6. **Delete** - Remove orphaned files only after verification passes
+7. **Cache** - Save updated index for next run
 
-## Usage
+## File Structure
 
-```bash
-# List available backup destinations
-python main.py list
+| File | Purpose |
+|------|---------|
+| `main.py` | CLI entry point |
+| `backup_utils.py` | BackupManager orchestrates the 8-phase sync |
+| `file_index.py` | FileInfo/FileIndex classes, MD5 computation, JSON caching |
+| `sync_engine.py` | Plan generation, execution, verification, deletion |
+| `config.py` | Exclusion lists, max file size setting |
+| `disk_utils.py` | Drive detection utilities |
 
-# Run a backup -- Saves `C:/path/to/source` to `D:/backups/my_backup`
-python main.py backup "C:/path/to/source" --destination "D:/backups" --name "my_backup" 
+## CLI Options
 
-# Run a backup with a custom max file size (Dont save files > 512MB)
-python main.py backup "C:/path/to/source" --destination "D:/backups" --name "my_backup" --max-file-size 512
+```
+python main.py backup <source> -d <destination> [options]
 
-# Manage excluded directories
-python main.py config --list-excludes
-python main.py config --add-exclude "temp"
-python main.py config --remove-exclude "temp"
+Options:
+  --dry-run        Show what would happen without making changes
+  --verify-only    Only verify existing backup, don't sync
+  --max-file-size  Skip files larger than N MB (default: 256)
 ```
 
 ## Default Exclusions
 
-To add/remove a directory, simply go to the config.py file and modify to your development needs.
+Directories: `node_modules`, `dist`, `build`, `.git`, `__pycache__`, `.venv`, `venv`, `.idea`, `.vscode`, `libs`
 
-- Temporary files: `.tmp`, `.log`, `.pyc`, `.pyo`, `.pyd`, `.DS_Store`
- 
-- Development directories:
-- `node_modules/` - Node.js dependencies
-- `build/` - Build output directories
-- `dist/` - Distribution directories
-- `.git/` - Git repository data
-- `__pycache__/` - Python cache
-- `.venv/`, `venv/` - Python virtual environments
-- `.idea/`, `.vscode/` - IDE settings
+Extensions: `.tmp`, `.log`, `.pyc`, `.pyo`, `.pyd`, `.DS_Store`
 
-## Skipped Files
+Edit `config.py` to customize.
 
-When running a backup, certain files and directories are automatically skipped based on your configuration. The backup tool provides a detailed report of skipped items, including the reason for exclusion. This helps you understand what was excluded and why.
+## Example Output
 
-### Example Output
-==================================================
-Backup completed!
-Total files processed: 2216
-Files skipped: 41
-Files copied: 2175
-==================================================
-Skipped files:
-----------------------------------------------------------------------------------------------------
-File                                             | Size           | Reason
-----------------------------------------------------------------------------------------------------
-background.psd                                   | 293.3MB        | File size: 293.3MB > 256MB
-app.log                                         | 1.2MB          | Excluded extension: .log
-node_modules/                                    | 0B             | Excluded directory: node_modules
-==================================================
+```
+======================================================================
+DevBackupBuddy Smart Sync
+======================================================================
+Source:      C:/Projects
+Destination: E:/Backup
+----------------------------------------------------------------------
+
+[Phase 1] Building source index...
+  Source: 1542 files indexed, 23 skipped
+
+[Phase 2] Building destination index...
+  Using cached index (1538 entries)
+  Destination: 1538 files indexed
+
+[Phase 3] Generating sync plan...
+Sync Plan Summary:
+  Files to skip (up-to-date): 1520
+  Files to copy: 15
+  Files to move: 7
+  Files to delete: 3
+
+[Phase 4] Executing sync...
+[Phase 5] Verifying mirror integrity...
+  Verification PASSED!
+[Phase 6] Deleting 3 orphaned files...
+[Phase 7] Cleaning empty directories...
+[Phase 8] Saving index cache...
+
+======================================================================
+Backup Complete!
+======================================================================
+  Files copied:  15
+  Files moved:   7
+  Files deleted: 3
+  Files skipped: 1520
+======================================================================
+```
 
 ## License
 
 Free Forever. Tranquil Software certified.
-
-

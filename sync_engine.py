@@ -6,8 +6,9 @@ import os
 import shutil
 from enum import Enum
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from file_index import FileIndex, FileInfo, compute_md5, normalize_path
+from config import PROJECT_TEMPLATES
 
 
 class SyncAction(Enum):
@@ -95,6 +96,120 @@ def _path_distance(path1: str, path2: str) -> int:
     return (len(parts1) - 1 - common_prefix_len) + (len(parts2) - 1 - common_prefix_len)
 
 
+def detect_project_roots(src_index: FileIndex) -> Dict[str, Set[str]]:
+    """
+    Detect project roots by looking for marker files.
+    
+    Returns:
+        Dict mapping project_path (e.g., 'my-app') to set of detected project types
+    """
+    project_roots: Dict[str, Set[str]] = {}
+    
+    for file_info in src_index.all_files():
+        filename = os.path.basename(file_info.relative_path)
+        
+        for project_type, template in PROJECT_TEMPLATES.items():
+            for marker in template['marker_files']:
+                # Handle markers that include subdirectories (e.g., 'src/App.tsx')
+                if '/' in marker:
+                    if file_info.relative_path.endswith(marker):
+                        # Get project root by removing the marker path
+                        marker_depth = marker.count('/') + 1
+                        parts = file_info.relative_path.split('/')
+                        if len(parts) > marker_depth:
+                            project_root = '/'.join(parts[:-marker_depth])
+                        else:
+                            project_root = ''
+                        
+                        if project_root not in project_roots:
+                            project_roots[project_root] = set()
+                        project_roots[project_root].add(project_type)
+                else:
+                    # Simple filename marker
+                    if filename == marker:
+                        # Get the directory containing this file as the project root
+                        parts = file_info.relative_path.split('/')
+                        if len(parts) > 1:
+                            project_root = '/'.join(parts[:-1])
+                        else:
+                            project_root = ''
+                        
+                        if project_root not in project_roots:
+                            project_roots[project_root] = set()
+                        project_roots[project_root].add(project_type)
+    
+    return project_roots
+
+
+def build_always_copy_map(project_roots: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
+    """
+    Build a map of file paths that should always be copied (never moved across projects).
+    
+    Returns:
+        Dict mapping relative file path to set of project roots it belongs to
+    """
+    always_copy_map: Dict[str, Set[str]] = {}
+    
+    for project_root, project_types in project_roots.items():
+        for project_type in project_types:
+            template = PROJECT_TEMPLATES.get(project_type, {})
+            for filename in template.get('always_copy', []):
+                if project_root:
+                    file_path = f"{project_root}/{filename}"
+                else:
+                    file_path = filename
+                
+                if file_path not in always_copy_map:
+                    always_copy_map[file_path] = set()
+                always_copy_map[file_path].add(project_root)
+    
+    return always_copy_map
+
+
+def get_project_root(file_path: str, project_roots: Dict[str, Set[str]]) -> Optional[str]:
+    """
+    Get the project root that a file belongs to.
+    Returns the longest matching project root, or None if not in a detected project.
+    """
+    parts = file_path.split('/')
+    
+    # Try progressively shorter paths to find the project root
+    for i in range(len(parts) - 1, -1, -1):
+        candidate = '/'.join(parts[:i]) if i > 0 else ''
+        if candidate in project_roots:
+            return candidate
+    
+    return None
+
+
+def is_cross_project_move(
+    src_path: str,
+    candidate_path: str,
+    project_roots: Dict[str, Set[str]],
+    always_copy_map: Dict[str, Set[str]]
+) -> bool:
+    """
+    Check if a potential move is actually a cross-project copy of a boilerplate file.
+    
+    Returns True if this should be treated as COPY instead of MOVE.
+    """
+    src_filename = os.path.basename(src_path)
+    
+    # Check if the source file is in the always-copy map
+    if src_path in always_copy_map:
+        # Get project roots for source and candidate
+        src_project = get_project_root(src_path, project_roots)
+        candidate_project = get_project_root(candidate_path, project_roots)
+        
+        # If they're in different projects, don't treat as move
+        if src_project != candidate_project:
+            return True
+    
+    return False
+
+
+
+
 def generate_sync_plan(
     src_index: FileIndex,
     dst_index: FileIndex,
@@ -110,6 +225,10 @@ def generate_sync_plan(
 
     # Track which destination files are "used" by a move
     used_dst_paths = set()
+
+    # Detect project roots and build always-copy map for smart move detection
+    project_roots = detect_project_roots(src_index)
+    always_copy_map = build_always_copy_map(project_roots)
 
     # Process each source file
     for src_file in src_index.all_files():
@@ -150,7 +269,23 @@ def generate_sync_plan(
 
             move_candidate = _find_best_move_candidate(src_file, candidates, src_root, dst_root)
 
-            if move_candidate:
+            # Check if this is a cross-project boilerplate file
+            if move_candidate and is_cross_project_move(
+                src_file.relative_path,
+                move_candidate.relative_path,
+                project_roots,
+                always_copy_map
+            ):
+                # This is identical boilerplate across different projects - COPY, not MOVE
+                items.append(SyncItem(
+                    action=SyncAction.COPY,
+                    src_path=src_full,
+                    dst_path=dst_full,
+                    src_rel_path=src_file.relative_path,
+                    dst_rel_path=src_file.relative_path,
+                    reason="Project boilerplate (same content in other project)"
+                ))
+            elif move_candidate:
                 # Found file with same content at different location -> MOVE
                 move_from = os.path.join(dst_root, move_candidate.relative_path.replace("/", os.sep))
                 items.append(SyncItem(
